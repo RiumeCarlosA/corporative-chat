@@ -1,28 +1,29 @@
-from transformers import DebertaV2Tokenizer, TFDebertaV2ForQuestionAnswering
+from transformers import DebertaV2Tokenizer, DebertaV2ForQuestionAnswering
 import tensorflow as tf
 from config.logging_config import setup_logging
 from elasticsearch import Elasticsearch
 from app.utils import combine_documents
 import os
 import re
+import torch
 
 tf.compat.v1.enable_eager_execution()
 
 logger = setup_logging()
 es = Elasticsearch([{'host': 'elasticsearch', 'port': 9200, 'scheme': 'http'}])
 
-class DeBERTaModel:
+class BERTModel:
     def __init__(self):
-        # Using mDeBERTa model for multilingual question answering
-        self.tokenizer = DebertaV2Tokenizer.from_pretrained("microsoft/mdeberta-v3-base")
-        self.model = TFDebertaV2ForQuestionAnswering.from_pretrained("microsoft/mdeberta-v3-base", from_pt=True)
+        # Correct imports for DeBERTa
+        self.tokenizer = DebertaV2Tokenizer.from_pretrained("microsoft/deberta-v3-base")
+        self.model = DebertaV2ForQuestionAnswering.from_pretrained("microsoft/deberta-v3-base")
         self.model_path = './fine_tuned_model'
         self.load_model()
 
     def load_model(self):
         """Load the fine-tuned model, if available."""
         if os.path.exists(self.model_path):
-            self.model = TFDebertaV2ForQuestionAnswering.from_pretrained(self.model_path)
+            self.model = DebertaV2ForQuestionAnswering.from_pretrained(self.model_path)
             logger.info(f"Model loaded from {self.model_path}")
         else:
             logger.info("No fine-tuned model found. Using the pre-trained mDeBERTa model.")
@@ -68,20 +69,17 @@ class DeBERTaModel:
         logger.info(f"Fine-tuned model saved at {self.model_path}")
 
     def predict(self, question, context_chunk):
-        """Predict an answer for a specific chunk of the context."""
-        inputs = self.tokenizer(question, context_chunk, return_tensors='tf', max_length=512, truncation=True, padding='max_length')
-        input_ids = inputs['input_ids']
-        attention_mask = inputs['attention_mask']
-
-        outputs = self.model({'input_ids': input_ids, 'attention_mask': attention_mask})
+        inputs = self.tokenizer(question, context_chunk, return_tensors="pt", max_length=512, truncation=True, padding="max_length")
+        with torch.no_grad():
+            outputs = self.model(**inputs)
         start_logits, end_logits = outputs.start_logits, outputs.end_logits
 
-        start_idx = tf.argmax(start_logits, axis=-1).numpy()[0]
-        end_idx = tf.argmax(end_logits, axis=-1).numpy()[0]
-        
-        answer = self.tokenizer.decode(input_ids[0][start_idx:end_idx + 1])
-        return self.validate_answer(answer), start_logits[0][start_idx].numpy() + end_logits[0][end_idx].numpy()
+        start_idx = torch.argmax(start_logits, dim=-1).item()
+        end_idx = torch.argmax(end_logits, dim=-1).item()
 
+        answer = self.tokenizer.decode(inputs['input_ids'][0][start_idx:end_idx + 1])
+        return answer.strip()
+        
     def ask_question(self, question):
         """Search Elasticsearch first, then use mDeBERTa model for question answering."""
         es_results = self.search_in_elasticsearch(question)
@@ -106,11 +104,10 @@ class DeBERTaModel:
         best_score = float('-inf')
 
         for chunk in chunks:
-            answer, score = self.predict(question, chunk)
-            logger.info(f"Chunk score: {score}, Answer: {answer}")
+            answer = self.predict(question, chunk)
+            logger.info(f"Chunk score: {answer}")
 
-            if score > best_score and len(answer.strip()) > 0:
-                best_score = score
+            if len(answer.strip()) > 0:
                 best_answer = answer
 
         return best_answer if best_answer else "No relevant answer found."
