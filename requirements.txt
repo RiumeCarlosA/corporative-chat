@@ -11,3 +11,4 @@ tf-models-official==2.9.0
 transformers
 pdfplumber
 elasticsearch==7.10.0
+torch

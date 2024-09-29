@@ -1,7 +1,8 @@
-from transformers import TFBertForQuestionAnswering, BertTokenizer
+from transformers import DebertaV2Tokenizer, TFDebertaV2ForQuestionAnswering
 import tensorflow as tf
 from config.logging_config import setup_logging
 from elasticsearch import Elasticsearch
+from app.utils import combine_documents
 import os
 import re
 
@@ -10,31 +11,32 @@ tf.compat.v1.enable_eager_execution()
 logger = setup_logging()
 es = Elasticsearch([{'host': 'elasticsearch', 'port': 9200, 'scheme': 'http'}])
 
-class BERTModel:
+class DeBERTaModel:
     def __init__(self):
-        self.tokenizer = BertTokenizer.from_pretrained("neuralmind/bert-base-portuguese-cased")
-        self.model = TFBertForQuestionAnswering.from_pretrained("neuralmind/bert-base-portuguese-cased")
+        # Using mDeBERTa model for multilingual question answering
+        self.tokenizer = DebertaV2Tokenizer.from_pretrained("microsoft/mdeberta-v3-base")
+        self.model = TFDebertaV2ForQuestionAnswering.from_pretrained("microsoft/mdeberta-v3-base", from_pt=True)
         self.model_path = './fine_tuned_model'
         self.load_model()
 
     def load_model(self):
         """Load the fine-tuned model, if available."""
         if os.path.exists(self.model_path):
-            self.model = TFBertForQuestionAnswering.from_pretrained(self.model_path)
+            self.model = TFDebertaV2ForQuestionAnswering.from_pretrained(self.model_path)
             logger.info(f"Model loaded from {self.model_path}")
         else:
-            logger.info("No fine-tuned model found. Using the pre-trained BERT model.")
+            logger.info("No fine-tuned model found. Using the pre-trained mDeBERTa model.")
 
     def chunk_text(self, text, max_len=400):
-        """Dividir o texto em pedaços que se encaixam dentro do limite de tokens do BERT."""
+        """Divide text into chunks that fit within DeBERTa's token limit."""
         tokens = self.tokenizer.encode(text)
         chunks = [tokens[i:i + max_len] for i in range(0, len(tokens), max_len)]
         chunk_texts = [self.tokenizer.decode(chunk) for chunk in chunks]
-        logger.info(f"Texto dividido em {len(chunk_texts)} partes.")
+        logger.info(f"Text divided into {len(chunk_texts)} parts.")
         return chunk_texts
 
     def validate_answer(self, answer):
-        """Validate that the answer is not just special tokens like [SEP], [PAD], etc."""
+        """Ensure the answer is not just special tokens like [SEP], [PAD], etc."""
         special_tokens = ['[SEP]', '[PAD]', '[CLS]']
         if all(token in special_tokens for token in answer.split()):
             return ""
@@ -66,7 +68,7 @@ class BERTModel:
         logger.info(f"Fine-tuned model saved at {self.model_path}")
 
     def predict(self, question, context_chunk):
-        """Prever uma resposta de um chunk específico do contexto."""
+        """Predict an answer for a specific chunk of the context."""
         inputs = self.tokenizer(question, context_chunk, return_tensors='tf', max_length=512, truncation=True, padding='max_length')
         input_ids = inputs['input_ids']
         attention_mask = inputs['attention_mask']
@@ -81,11 +83,11 @@ class BERTModel:
         return self.validate_answer(answer), start_logits[0][start_idx].numpy() + end_logits[0][end_idx].numpy()
 
     def ask_question(self, question):
-        """Search Elasticsearch first, then use BERT model for question answering."""
+        """Search Elasticsearch first, then use mDeBERTa model for question answering."""
         es_results = self.search_in_elasticsearch(question)
 
         if not es_results:
-            logger.warning("Nenhum resultado encontrado no Elasticsearch. Falling back to raw document content.")
+            logger.warning("No results found in Elasticsearch. Falling back to raw document content.")
             combined_text = combine_documents()  # Use full document content if no results in Elasticsearch
             chunks = self.chunk_text(combined_text, max_len=400)
         else:
@@ -93,7 +95,6 @@ class BERTModel:
             for result in es_results:
                 # Dynamically check for fields that contain relevant text
                 source = result.get('_source', {})
-                # Try common field names or any text-containing field
                 content_field = source.get('content') or source.get('text') or ' '.join(source.values())
                 
                 if content_field:
@@ -127,11 +128,12 @@ class BERTModel:
                     "multi_match": {
                         "query": query,
                         "fields": fields,
-                        "type": "best_fields"
+                        "type": "best_fields",
+                        "fuzziness": "AUTO"  # Enabling fuzzy matching for improved results
                     }
                 },
                 "highlight": {
-                    "fields": {field: {} for field in fields}  # Enable highlighting for all detected fields
+                    "fields": {field: {} for field in fields}  # Highlighting for better focus
                 }
             }, headers={"Content-Type": "application/json"})
             
