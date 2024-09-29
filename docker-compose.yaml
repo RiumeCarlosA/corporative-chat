@@ -1,0 +1,62 @@
+version: '3'
+services:
+  redis:
+    image: redis:7.4
+    ports:
+      - "6379:6379"
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.10.0
+    container_name: elasticsearch
+    environment:
+      - discovery.type=single-node
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:7.10.0
+    container_name: kibana
+    ports:
+      - "5601:5601"
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    depends_on:
+      - elasticsearch
+
+  flask-app:
+    build: .
+    command: flask run --host=0.0.0.0 --port=5000
+    volumes:
+      - .:/app
+    depends_on:
+      - redis
+      - elasticsearch
+    environment:
+      - FLASK_APP=main.py
+      - FLASK_ENV=development
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - ELASTICSEARCH_HOST=http://elasticsearch:9200
+    ports:
+      - "5000:5000"
+
+  celery-worker:
+    build: .
+    command: celery -A app.celery.celery worker --loglevel=info
+    depends_on:
+      - redis
+      - elasticsearch
+    volumes:
+      - .:/app
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - ELASTICSEARCH_HOST=http://elasticsearch:9200
+
+volumes:
+  es_data:
+    driver: local
